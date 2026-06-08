@@ -1127,6 +1127,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
 
             # Dict reads are GIL-safe from the asyncio event loop.
             prefix_token_ids = self._prefix_tok_cache.get(prefix_key)
+            print(f"DEBUG {'HIT' if prefix_token_ids is not None else 'MISS'} key={prefix_key[:8]} cache_size={len(self._prefix_tok_cache)}", file=sys.stderr, flush=True)
             if prefix_token_ids is None:
                 # Cache miss: tokenise in the shared executor thread pool.
                 prefix_token_ids = await self.get_async_tokenizer().encode(
@@ -1155,6 +1156,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 # mm_data is None in this branch; attach mm_uuids if present.
                 if mm_uuids is not None:
                     prompt["multi_modal_uuids"] = mm_uuids
+                print(f"DEBUG FAST PATH returned prefix={len(prefix_token_ids)} suffix={len(suffix_token_ids)}", file=sys.stderr, flush=True)
                 return conversation, prompt
 
             # Prefix text did not match — template is not positionally stable
