@@ -1129,13 +1129,16 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             prefix_token_ids = self._prefix_tok_cache.get(prefix_key)
             print(f"DEBUG {'HIT' if prefix_token_ids is not None else 'MISS'} key={prefix_key[:8]} cache_size={len(self._prefix_tok_cache)}", file=sys.stderr, flush=True)
             if prefix_token_ids is None:
-                # Cache miss: tokenise in the shared executor thread pool.
-                prefix_token_ids = await self.get_async_tokenizer().encode(
-                    prefix_text, add_special_tokens=False
-                )
-                with self._prefix_tok_lock:
-                    self._prefix_tok_cache[prefix_key] = prefix_token_ids
-
+                            # Cache miss: tokenise outside the lock so concurrent threads
+                            # can compute in parallel rather than serialising on the lock.
+                            new_token_ids = await self.get_async_tokenizer().encode(
+                                prefix_text, add_special_tokens=False
+                            )
+                            with self._prefix_tok_lock:
+                                if prefix_key not in self._prefix_tok_cache:
+                                    self._prefix_tok_cache[prefix_key] = new_token_ids
+                            prefix_token_ids = self._prefix_tok_cache[prefix_key]
+                            
             # Render the full conversation to text (tokenize=False is already
             # guaranteed in this branch, but spell it out for clarity).
             full_text: str = await self._apply_chat_template_async(
