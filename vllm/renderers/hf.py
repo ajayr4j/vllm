@@ -21,7 +21,6 @@ import jinja2.parser
 import jinja2.sandbox
 import torch
 from typing_extensions import override
-import sys
 
 from vllm.entrypoints.chat_utils import (
     PROMPT_EMBEDS_PLACEHOLDER_TOKEN,
@@ -1092,7 +1091,6 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         #   • use_unified_vision_chunk (prompt_raw is rewritten after rendering).
         # ------------------------------------------------------------------
         boundary = _find_cache_control_boundary(messages)
-        print(f"DEBUG boundary={boundary} msgs={len(messages)}", file=sys.stderr, flush=True)
 
         tokenize_in_template = chat_template_kwargs.get("tokenize", False)
         if (
@@ -1127,18 +1125,17 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
 
             # Dict reads are GIL-safe from the asyncio event loop.
             prefix_token_ids = self._prefix_tok_cache.get(prefix_key)
-            print(f"DEBUG {'HIT' if prefix_token_ids is not None else 'MISS'} key={prefix_key[:8]} cache_size={len(self._prefix_tok_cache)}", file=sys.stderr, flush=True)
             if prefix_token_ids is None:
-                            # Cache miss: tokenise outside the lock so concurrent threads
-                            # can compute in parallel rather than serialising on the lock.
-                            new_token_ids = await self.get_async_tokenizer().encode(
-                                prefix_text, add_special_tokens=False
-                            )
-                            with self._prefix_tok_lock:
-                                if prefix_key not in self._prefix_tok_cache:
-                                    self._prefix_tok_cache[prefix_key] = new_token_ids
-                            prefix_token_ids = self._prefix_tok_cache[prefix_key]
-                            
+                # Cache miss: tokenise outside the lock so concurrent threads
+                # can compute in parallel rather than serialising on the lock.
+                new_token_ids = await self.get_async_tokenizer().encode(
+                    prefix_text, add_special_tokens=False
+                )
+                with self._prefix_tok_lock:
+                    if prefix_key not in self._prefix_tok_cache:
+                        self._prefix_tok_cache[prefix_key] = new_token_ids
+                prefix_token_ids = self._prefix_tok_cache[prefix_key]
+
             # Render the full conversation to text (tokenize=False is already
             # guaranteed in this branch, but spell it out for clarity).
             full_text: str = await self._apply_chat_template_async(
@@ -1159,7 +1156,6 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 # mm_data is None in this branch; attach mm_uuids if present.
                 if mm_uuids is not None:
                     prompt["multi_modal_uuids"] = mm_uuids
-                print(f"DEBUG FAST PATH returned prefix={len(prefix_token_ids)} suffix={len(suffix_token_ids)}", file=sys.stderr, flush=True)
                 return conversation, prompt
 
             # Prefix text did not match — template is not positionally stable
