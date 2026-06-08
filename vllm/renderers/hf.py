@@ -21,6 +21,7 @@ import jinja2.parser
 import jinja2.sandbox
 import torch
 from typing_extensions import override
+import sys
 
 from vllm.entrypoints.chat_utils import (
     PROMPT_EMBEDS_PLACEHOLDER_TOKEN,
@@ -1091,6 +1092,8 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         #   • use_unified_vision_chunk (prompt_raw is rewritten after rendering).
         # ------------------------------------------------------------------
         boundary = _find_cache_control_boundary(messages)
+        print(f"DEBUG boundary={boundary} msgs={len(messages)}", file=sys.stderr, flush=True)
+
         tokenize_in_template = chat_template_kwargs.get("tokenize", False)
         if (
             boundary >= 0
