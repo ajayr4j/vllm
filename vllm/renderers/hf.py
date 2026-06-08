@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import inspect
 import itertools
+import threading
 import weakref
 from collections import defaultdict, deque
 from collections.abc import Sequence
@@ -853,6 +855,29 @@ def replace_vision_chunk_video_placeholder(
     return prompt_raw
 
 
+def _find_cache_control_boundary(
+    messages: list[ChatCompletionMessageParam],
+) -> int:
+    """Return the last message index that carries a cache_control marker.
+
+    Scans messages in reverse order.  A marker is present when either the
+    message dict itself has a ``cache_control`` key, or one of the dicts in
+    a list-valued ``content`` field has one (Anthropic-style content blocks).
+
+    Returns -1 when no marker is found.
+    """
+    for i in range(len(messages) - 1, -1, -1):
+        msg = messages[i]
+        if "cache_control" in msg:
+            return i
+        content = msg.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and "cache_control" in part:
+                    return i
+    return -1
+
+
 class HfRenderer(BaseRenderer[HfTokenizer]):
     def __init__(
         self,
@@ -876,6 +901,14 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         self._apply_chat_template_async = make_async(
             safe_apply_chat_template, executor=self._executor
         )
+
+        # Prefix-token cache for the cache_control tokenizer-skip optimisation.
+        # Maps SHA-256(prefix_text) -> token_ids so that repeated requests
+        # that share a stable prefix (marked with cache_control) skip
+        # re-tokenising that prefix.  Lock guards writes only; plain dict reads
+        # are GIL-safe from the asyncio event loop.
+        self._prefix_tok_cache: dict[str, list[int]] = {}
+        self._prefix_tok_lock = threading.Lock()
 
         if self.tokenizer is not None:
             maybe_make_thread_pool(
@@ -1003,16 +1036,18 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 _ensure_prompt_embeds_placeholder_token(tokenizer)
             )
 
+        # Extract content_format separately so the prefix path can reuse it.
+        content_format = resolve_chat_template_content_format(
+            chat_template=params.chat_template,
+            tools=params.chat_template_kwargs.get("tools"),
+            given_format=params.chat_template_content_format,
+            tokenizer=tokenizer,
+            model_config=model_config,
+        )
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
             messages,
             model_config,
-            content_format=resolve_chat_template_content_format(
-                chat_template=params.chat_template,
-                tools=params.chat_template_kwargs.get("tools"),
-                given_format=params.chat_template_content_format,
-                tokenizer=tokenizer,
-                model_config=model_config,
-            ),
+            content_format=content_format,
             media_io_kwargs=params.media_io_kwargs,
             mm_processor_kwargs=params.mm_processor_kwargs,
         )
@@ -1033,12 +1068,110 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 logger.warning_once(_TOKENIZE_OVERRIDE_WARNING)
             chat_template_kwargs["tokenize"] = True
 
-        prompt_raw = await self._apply_chat_template_async(
-            model_config,
-            tokenizer,
-            conversation,
-            **chat_template_kwargs,
-        )
+        # ------------------------------------------------------------------
+        # cache_control prefix-caching fast path
+        #
+        # When the request marks a stable prefix with cache_control (Anthropic
+        # ephemeral style), we avoid re-tokenising that prefix on every call:
+        #   1. Render the prefix-only conversation to text and look up its
+        #      SHA-256 digest in self._prefix_tok_cache.
+        #   2. On a miss, tokenise and store.
+        #   3. Render the full conversation to text, strip the prefix portion,
+        #      and tokenise only the suffix.
+        #   4. Return prefix_ids + suffix_ids as a TokensPrompt so that
+        #      _tokenize_singleton_prompt_async skips tokenisation entirely.
+        #
+        # Skipped when:
+        #   • tokenize=True is in the template kwargs (Mistral tokenizer path
+        #     where apply_chat_template returns token IDs directly — a parallel
+        #     optimisation would require splitting at the token level).
+        #   • mm_data is present (placeholder offsets depend on the joint
+        #     tokenisation of the whole conversation).
+        #   • prompt_embeds are present (require tokenize=True post-processing).
+        #   • use_unified_vision_chunk (prompt_raw is rewritten after rendering).
+        # ------------------------------------------------------------------
+        boundary = _find_cache_control_boundary(messages)
+        tokenize_in_template = chat_template_kwargs.get("tokenize", False)
+        if (
+            boundary >= 0
+            and not tokenize_in_template
+            and mm_data is None
+            and not prompt_embeds_tensors
+            and not self.use_unified_vision_chunk
+        ):
+            # Parse only the prefix messages to get their ConversationMessage
+            # form.  parse_chat_messages is synchronous and lightweight (pure
+            # Python string/dict processing, no I/O).
+            prefix_conv, _, _ = parse_chat_messages(
+                messages[: boundary + 1],
+                model_config,
+                content_format=content_format,
+                media_io_kwargs=params.media_io_kwargs,
+                mm_processor_kwargs=params.mm_processor_kwargs,
+            )
+
+            # Render prefix as text.  add_generation_prompt=False because
+            # more turns follow the prefix boundary.
+            prefix_render_kwargs = {
+                **chat_template_kwargs,
+                "tokenize": False,
+                "add_generation_prompt": False,
+            }
+            prefix_text: str = safe_apply_chat_template(
+                model_config, tokenizer, prefix_conv, **prefix_render_kwargs
+            )
+            prefix_key = hashlib.sha256(prefix_text.encode()).hexdigest()
+
+            # Dict reads are GIL-safe from the asyncio event loop.
+            prefix_token_ids = self._prefix_tok_cache.get(prefix_key)
+            if prefix_token_ids is None:
+                # Cache miss: tokenise in the shared executor thread pool.
+                prefix_token_ids = await self.get_async_tokenizer().encode(
+                    prefix_text, add_special_tokens=False
+                )
+                with self._prefix_tok_lock:
+                    self._prefix_tok_cache[prefix_key] = prefix_token_ids
+
+            # Render the full conversation to text (tokenize=False is already
+            # guaranteed in this branch, but spell it out for clarity).
+            full_text: str = await self._apply_chat_template_async(
+                model_config,
+                tokenizer,
+                conversation,
+                **{**chat_template_kwargs, "tokenize": False},
+            )
+
+            if full_text.startswith(prefix_text):
+                suffix_text = full_text[len(prefix_text):]
+                suffix_token_ids = await self.get_async_tokenizer().encode(
+                    suffix_text, add_special_tokens=False
+                )
+                prompt = parse_dec_only_prompt(
+                    list(prefix_token_ids) + list(suffix_token_ids)
+                )
+                # mm_data is None in this branch; attach mm_uuids if present.
+                if mm_uuids is not None:
+                    prompt["multi_modal_uuids"] = mm_uuids
+                return conversation, prompt
+
+            # Prefix text did not match — template is not positionally stable
+            # for this conversation.  Fall back to standard tokenisation using
+            # the full text we already have.
+            logger.warning(
+                "cache_control prefix text is not a prefix of the full "
+                "conversation rendering; falling back to standard tokenisation "
+                "(prefix_len=%d, full_len=%d)",
+                len(prefix_text),
+                len(full_text),
+            )
+            prompt_raw: str | list[int] = full_text
+        else:
+            prompt_raw = await self._apply_chat_template_async(
+                model_config,
+                tokenizer,
+                conversation,
+                **chat_template_kwargs,
+            )
 
         # NOTE: use_unified_vision_chunk is currently specific to Kimi-K2.5
         # model which uses unified vision chunks for both images and videos.
