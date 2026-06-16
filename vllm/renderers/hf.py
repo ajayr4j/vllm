@@ -1020,7 +1020,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:
             prompt["multi_modal_uuids"] = mm_uuids
-
+        
         return conversation, prompt
 
 
@@ -1138,6 +1138,8 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
 
             # Dict reads are GIL-safe from the asyncio event loop.
             prefix_token_ids = self._prefix_tok_cache.get(prefix_key)
+            cache_hit = prefix_token_ids is not None
+
             if prefix_token_ids is None:
                 # Cache miss: tokenise outside the lock so concurrent threads
                 # can compute in parallel rather than serialising on the lock.
@@ -1191,6 +1193,13 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 # mm_data is None in this branch; attach mm_uuids if present.
                 if mm_uuids is not None:
                     prompt["multi_modal_uuids"] = mm_uuids
+                
+                logger.info(
+                    "cache_control_bench "
+                    f"cache_hit={cache_hit} "
+                    f"chat_template_ms={timings['chat_template_ms']:.2f} "
+                    f"tokenization_ms={timings['tokenization_ms']:.2f}"
+                )
                 return conversation, prompt
 
             # Prefix text did not match — template is not positionally stable
