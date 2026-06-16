@@ -1194,12 +1194,10 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 if mm_uuids is not None:
                     prompt["multi_modal_uuids"] = mm_uuids
                 
-                logger.info(
-                    "cache_control_bench "
-                    f"cache_hit={cache_hit} "
-                    f"chat_template_ms={timings['chat_template_ms']:.2f} "
-                    f"tokenization_ms={timings['tokenization_ms']:.2f}"
-                )
+                logger.info("cache_control_chat_template_ms=%.4f", timings['chat_template_ms'])
+                logger.info("cache_control_tokenization_ms=%.4f suffix_tokens=%d", timings['tokenization_ms'], len(suffix_token_ids))
+                logger.info("cache_control_cache_hit=%s prefix_tokens=%d", cache_hit, len(prefix_token_ids))
+
                 return conversation, prompt
 
             # Prefix text did not match — template is not positionally stable
@@ -1227,9 +1225,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 time.perf_counter() - t0
             ) * 1000
             logger.info(
-                "baseline_bench "
-                f"chat_template_ms={timings['chat_template_ms']:.2f} "
-                f"tokenization_ms={timings['tokenization_ms']:.2f}"
+                f"baseline_bench_chat_template_ms={timings['chat_template_ms']:.4f}"
             )
         # NOTE: use_unified_vision_chunk is currently specific to Kimi-K2.5
         # model which uses unified vision chunks for both images and videos.
@@ -1251,12 +1247,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 ),
             )
 
-        t0 = time.perf_counter()
         prompt = parse_dec_only_prompt(prompt_raw)
-        timings["tokenization_ms"] = (
-            time.perf_counter() - t0
-        ) * 1000
-        
         # See `render_messages` for the rationale.
         if prompt_embeds_tensors and mm_data:
             assert prompt_embeds_placeholder_token_id is not None

@@ -64,6 +64,7 @@ if TYPE_CHECKING:
         ChatCompletionMessageParam,
         ConversationMessage,
     )
+import time
 
 logger = init_logger(__name__)
 
@@ -437,11 +438,17 @@ class BaseRenderer(ABC, Generic[_T]):
         params: TokenizeParams,
     ) -> TokensPrompt:
         tokenizer = self.get_async_tokenizer()
+        t0 = time.perf_counter()
         prompt_token_ids = await tokenizer.encode(
             prompt["prompt"],
             **params.get_encode_kwargs(),
         )
-
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        logger.info(
+            "baseline_tokenization_ms=%.4f tokens=%d",
+            elapsed_ms,
+            len(prompt_token_ids),
+        )
         return TokensPrompt(prompt_token_ids=prompt_token_ids, **prompt)
 
     def _detokenize_prompt(self, prompt: TokensPrompt) -> TokensPrompt:
