@@ -1226,7 +1226,10 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             timings["chat_template_ms"] = (
                 time.perf_counter() - t0
             ) * 1000
-
+            logger.info(
+                "baseline_bench "
+                f"chat_template_ms={timings['chat_template_ms']:.2f}"
+            )
         # NOTE: use_unified_vision_chunk is currently specific to Kimi-K2.5
         # model which uses unified vision chunks for both images and videos.
         if (
