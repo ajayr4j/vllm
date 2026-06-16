@@ -1228,7 +1228,8 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             ) * 1000
             logger.info(
                 "baseline_bench "
-                f"chat_template_ms={timings['chat_template_ms']:.2f}"
+                f"chat_template_ms={timings['chat_template_ms']:.2f} "
+                f"tokenization_ms={timings['tokenization_ms']:.2f}"
             )
         # NOTE: use_unified_vision_chunk is currently specific to Kimi-K2.5
         # model which uses unified vision chunks for both images and videos.
@@ -1250,8 +1251,12 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 ),
             )
 
+        t0 = time.perf_counter()
         prompt = parse_dec_only_prompt(prompt_raw)
-
+        timings["tokenization_ms"] = (
+            time.perf_counter() - t0
+        ) * 1000
+        
         # See `render_messages` for the rationale.
         if prompt_embeds_tensors and mm_data:
             assert prompt_embeds_placeholder_token_id is not None
