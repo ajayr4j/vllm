@@ -21,6 +21,7 @@ import jinja2.parser
 import jinja2.sandbox
 import torch
 from typing_extensions import override
+import time
 
 from vllm.entrypoints.chat_utils import (
     PROMPT_EMBEDS_PLACEHOLDER_TOKEN,
@@ -1022,6 +1023,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
 
         return conversation, prompt
 
+
     async def render_messages_async(
         self,
         messages: list[ChatCompletionMessageParam],
@@ -1029,7 +1031,10 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         model_config = self.model_config
         tokenizer = self.get_tokenizer()
-
+        timings = {
+            "chat_template_ms": 0.0,
+            "tokenization_ms": 0.0,
+        }
         prompt_embeds_placeholder_token_id: int | None = None
         if model_config.enable_prompt_embeds:
             prompt_embeds_placeholder_token_id = (
@@ -1118,9 +1123,17 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 "tokenize": False,
                 "add_generation_prompt": False,
             }
+            t0 = time.perf_counter()
             prefix_text: str = safe_apply_chat_template(
-                model_config, tokenizer, prefix_conv, **prefix_render_kwargs
+                model_config,
+                tokenizer,
+                prefix_conv,
+                **prefix_render_kwargs,
             )
+
+            timings["chat_template_ms"] += (
+                time.perf_counter() - t0
+            ) * 1000
             prefix_key = hashlib.sha256(prefix_text.encode()).hexdigest()
 
             # Dict reads are GIL-safe from the asyncio event loop.
@@ -1128,9 +1141,17 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             if prefix_token_ids is None:
                 # Cache miss: tokenise outside the lock so concurrent threads
                 # can compute in parallel rather than serialising on the lock.
+                t0 = time.perf_counter()
+
                 new_token_ids = await self.get_async_tokenizer().encode(
-                    prefix_text, add_special_tokens=False
+                    prefix_text,
+                    add_special_tokens=False,
                 )
+
+                timings["tokenization_ms"] += (
+                    time.perf_counter() - t0
+                ) * 1000
+
                 with self._prefix_tok_lock:
                     if prefix_key not in self._prefix_tok_cache:
                         self._prefix_tok_cache[prefix_key] = new_token_ids
@@ -1138,6 +1159,8 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
 
             # Render the full conversation to text (tokenize=False is already
             # guaranteed in this branch, but spell it out for clarity).
+            t0 = time.perf_counter()
+
             full_text: str = await self._apply_chat_template_async(
                 model_config,
                 tokenizer,
@@ -1145,11 +1168,23 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 **{**chat_template_kwargs, "tokenize": False},
             )
 
+            timings["chat_template_ms"] += (
+                time.perf_counter() - t0
+            ) * 1000
+
             if full_text.startswith(prefix_text):
                 suffix_text = full_text[len(prefix_text):]
+                t0 = time.perf_counter()
+
                 suffix_token_ids = await self.get_async_tokenizer().encode(
-                    suffix_text, add_special_tokens=False
+                    suffix_text,
+                    add_special_tokens=False,
                 )
+
+                timings["tokenization_ms"] += (
+                    time.perf_counter() - t0
+                ) * 1000
+
                 prompt = parse_dec_only_prompt(
                     list(prefix_token_ids) + list(suffix_token_ids)
                 )
@@ -1170,12 +1205,18 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             )
             prompt_raw: str | list[int] = full_text
         else:
+            t0 = time.perf_counter()
+
             prompt_raw = await self._apply_chat_template_async(
                 model_config,
                 tokenizer,
                 conversation,
                 **chat_template_kwargs,
             )
+
+            timings["chat_template_ms"] = (
+                time.perf_counter() - t0
+            ) * 1000
 
         # NOTE: use_unified_vision_chunk is currently specific to Kimi-K2.5
         # model which uses unified vision chunks for both images and videos.
